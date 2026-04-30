@@ -34,6 +34,7 @@ import {
   query,
   where,
   onSnapshot,
+  getDoc,
   addDoc,
   updateDoc,
   doc,
@@ -98,7 +99,10 @@ const HomeScreen = ({ navigation, route }: any) => {
   const [greeting, setGreeting] = useState(getGreeting());
   const [currentDate, setCurrentDate] = useState(new Date());
   const [clockLoading, setClockLoading] = useState(false);
+  const [processingStep, setProcessingStep] = useState('');
   const [staffData, setStaffData] = useState(staff);
+  const lastLocation = useRef<any>(null);
+  const locationWatchId = useRef<number | null>(null);
   const [showConfirmLogout, setShowConfirmLogout] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [activeBanner, setActiveBanner] = useState<any>(null);
@@ -158,6 +162,21 @@ const HomeScreen = ({ navigation, route }: any) => {
     if (!staffData?.id && !staffData?.uid) return;
     const staffId = staffData.id || staffData.uid;
 
+    let unsubProfile: (() => void) | undefined;
+    let unsubAttendance: (() => void) | undefined;
+    let unsubNotif: (() => void) | undefined;
+    let releaseMonitor: any;
+
+    // Staff Profile Real-time Sync
+    unsubProfile = onSnapshot(doc(db, "staff", staffId), (docSnap) => {
+      if (docSnap.exists()) {
+        const updatedData = { id: docSnap.id, ...docSnap.data() };
+        setStaffData(updatedData);
+        // Also update AsyncStorage so it persists
+        AsyncStorage.setItem('staffData', JSON.stringify(updatedData));
+      }
+    }, (err) => console.error("[Home] Profile sync error:", err));
+
     if (!auth.currentUser) {
       console.warn("[Home] No Firebase Auth session. Redirecting...");
       AsyncStorage.removeItem('staffData');
@@ -171,7 +190,7 @@ const HomeScreen = ({ navigation, route }: any) => {
       where("staff_id", "==", staffId)
     );
 
-    const unsubAttendance = onSnapshot(qAttendance, (snapshot) => {
+    unsubAttendance = onSnapshot(qAttendance, (snapshot) => {
       let allLogs = snapshot.docs.map(docSnap => ({
         id: docSnap.id,
         ...(docSnap.data({ serverTimestamps: 'estimate' }) as any)
@@ -241,7 +260,7 @@ const HomeScreen = ({ navigation, route }: any) => {
     // Use a Ref to store the latest notifications so the setInterval can access them safely
     const allNotificationsRef = { current: [] as any[] };
 
-    const unsubNotif = onSnapshot(qNotif, (snapshot) => {
+    unsubNotif = onSnapshot(qNotif, (snapshot) => {
       const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
       allNotificationsRef.current = docs;
       
@@ -275,40 +294,93 @@ const HomeScreen = ({ navigation, route }: any) => {
     });
 
     // 3. Time Monitor: Check the ALREADY LOADED notifications every 5 seconds
-    const releaseMonitor = setInterval(() => {
-      allNotificationsRef.current.forEach((n: any) => {
+    releaseMonitor = setInterval(() => {
+      // Safely access the current list of notifications from our Ref
+      const currentNotifs = allNotificationsRef.current || [];
+      
+      currentNotifs.forEach((n: any) => {
+        // Only trigger if it's scheduled, has a time, hasn't been shown, and IS DUE NOW
         if (n.status === 'scheduled' && n.scheduled_for && !shownNotifIds.has(n.id)) {
-          const scheduledTime = n.scheduled_for.toDate ? n.scheduled_for.toDate().getTime() : new Date(n.scheduled_for).getTime();
-          if (Date.now() >= scheduledTime) {
-            // It's time! Show the popup
+          const sTime = n.scheduled_for.toDate ? n.scheduled_for.toDate().getTime() : new Date(n.scheduled_for).getTime();
+          
+          if (Date.now() >= sTime) {
+            // RELEASE IT: Show banner and add to shown list
             setActiveBanner(n);
             shownNotifIds.add(n.id);
             bannerY.value = withSpring(16, { damping: 15 });
             setTimeout(() => { bannerY.value = withTiming(-150); }, 5000);
             
-            // Re-calculate unread count
-            const newCount = allNotificationsRef.current.filter((notif: any) => {
-              if (notif.read) return false;
-              const isScheduled = notif.status === 'scheduled' && notif.scheduled_for;
-              const time = isScheduled ? (notif.scheduled_for.toDate ? notif.scheduled_for.toDate().getTime() : new Date(notif.scheduled_for).getTime()) : 0;
-              return notif.status === 'pending' || (isScheduled && Date.now() >= time);
+            // Instantly update the unread count so the badge on the bell icon refreshes
+            const unread = currentNotifs.filter((item: any) => {
+              if (item.read) return false;
+              if (item.status === 'pending') return true;
+              if (item.status === 'scheduled' && item.scheduled_for) {
+                const itemTime = item.scheduled_for.toDate ? item.scheduled_for.toDate().getTime() : new Date(item.scheduled_for).getTime();
+                return Date.now() >= itemTime;
+              }
+              return false;
             }).length;
-            setUnreadCount(newCount);
+            setUnreadCount(unread);
           }
         }
       });
     }, 5000);
 
     return () => {
-      unsubAttendance();
-      unsubNotif();
-      clearInterval(releaseMonitor);
+      if (unsubProfile) unsubProfile();
+      if (unsubAttendance) unsubAttendance();
+      if (unsubNotif) unsubNotif();
+      if (releaseMonitor) clearInterval(releaseMonitor);
     };
 
 
   }, [staffData, startTimer, stopTimer, navigation]);
 
   useEffect(() => {
+    const reverseGeocode = async (latitude: number, longitude: number) => {
+      try {
+        const response = await fetch(
+          `https://maps.googleapis.com/maps/api/geocode/json?latlng=${latitude},${longitude}&key=${GOOGLE_MAPS_API_KEY}`
+        );
+        const data = await response.json();
+        if (data.results && data.results.length > 0) {
+          setCurrentLocation(data.results[0].formatted_address);
+        } else {
+          setCurrentLocation('Unknown Location');
+        }
+      } catch (error) {
+        console.error('Geocode error:', error);
+        setCurrentLocation('Location lookup failed');
+      }
+    };
+
+    const getCurrentLocation = () => {
+      Geolocation.getCurrentPosition(
+        position => {
+          const { latitude, longitude } = position.coords;
+          reverseGeocode(latitude, longitude);
+        },
+        error => {
+          console.log(error);
+          setCurrentLocation('Unable to fetch GPS');
+        },
+        { enableHighAccuracy: false, timeout: 15000, maximumAge: 10000 }
+      );
+    };
+
+    const startWatching = () => {
+      if (locationWatchId.current) Geolocation.clearWatch(locationWatchId.current);
+      locationWatchId.current = Geolocation.watchPosition(
+        pos => {
+          lastLocation.current = pos;
+          const { latitude, longitude } = pos.coords;
+          reverseGeocode(latitude, longitude);
+        },
+        err => console.log("[GPS Watch] Error:", err),
+        { enableHighAccuracy: true, distanceFilter: 10, interval: 10000, fastestInterval: 5000 }
+      );
+    };
+
     const requestLocationPermission = async () => {
       if (Platform.OS === 'android') {
         try {
@@ -332,120 +404,165 @@ const HomeScreen = ({ navigation, route }: any) => {
       }
     };
 
-    const getCurrentLocation = () => {
-      Geolocation.getCurrentPosition(
-        position => {
-          const { latitude, longitude } = position.coords;
-          reverseGeocode(latitude, longitude);
-        },
-        error => {
-          console.log(error);
-          setCurrentLocation('Unable to fetch GPS');
-        },
-        { enableHighAccuracy: false, timeout: 15000, maximumAge: 10000 }
-      );
-    };
+    requestLocationPermission().then(() => startWatching());
 
-    const reverseGeocode = async (latitude: number, longitude: number) => {
-      try {
-        const response = await fetch(
-          `https://maps.googleapis.com/maps/api/geocode/json?latlng=${latitude},${longitude}&key=${GOOGLE_MAPS_API_KEY}`
-        );
-        const data = await response.json();
-        if (data.results && data.results.length > 0) {
-          setCurrentLocation(data.results[0].formatted_address);
-        } else {
-          setCurrentLocation('Unknown Location');
-        }
-      } catch (error) {
-        console.error('Geocode error:', error);
-        setCurrentLocation('Location lookup failed');
-      }
+    return () => {
+      if (locationWatchId.current) Geolocation.clearWatch(locationWatchId.current);
     };
-
-    requestLocationPermission();
   }, []);
 
   const getFirstName = (fullName: string) => {
     if (!fullName) return 'Staff';
-    return fullName.split(' ')[0];
+    return fullName.trim().split(' ')[0];
+  };
+
+  // Helper: Calculate distance in meters between two GPS points (Haversine formula)
+  const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+    const R = 6371e3; // Earth's radius in meters
+    const φ1 = lat1 * Math.PI / 180;
+    const φ2 = lat2 * Math.PI / 180;
+    const Δφ = (lat2 - lat1) * Math.PI / 180;
+    const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+              Math.cos(φ1) * Math.cos(φ2) *
+              Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+    return R * c; // Distance in meters
   };
 
   const performClockAction = async () => {
-    if (clockLoading || !staffData) {
-      console.warn("[Clock] Action blocked: loading or missing staffData");
-      return;
-    }
+    if (clockLoading || !staffData) return;
+    
+    console.log("[Clock] Staff Data Debug:", staffData);
 
     const staffId = staffData.id || staffData.uid;
     if (!staffId) {
-      console.error("[Clock] Missing staff ID!");
+      setAlertConfig({ visible: true, title: 'ERROR', message: 'Staff profile not loaded. Please restart the app.', type: 'error' });
       return;
     }
 
     setClockLoading(true);
+    setProcessingStep('Acquiring GPS...');
+
+    const now = new Date();
 
     try {
-      console.log(`[Clock] Attempting ${isClockedIn ? 'Clock Out' : 'Clock In'} for staff: ${staffId}`);
+      // START PARALLEL TASKS: GPS and Restaurant Data
+      const restaurantDataPromise = !isClockedIn && staffData.restaurant_id 
+        ? getDoc(doc(db, "restaurants", staffData.restaurant_id))
+        : Promise.resolve(null);
+
+      // 1. GET GPS POSITION (OPTIMIZED 3-TIER)
+      const position: any = await (async () => {
+        // Tier 0: Instant check of our internal background cache (< 1 min old)
+        if (lastLocation.current && (Date.now() - lastLocation.current.timestamp) < 60000) {
+          return lastLocation.current;
+        }
+
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("Timeout")), 3000);
+          Geolocation.getCurrentPosition(
+            (pos) => { clearTimeout(timer); resolve(pos); },
+            (err) => { clearTimeout(timer); reject(err); },
+            { enableHighAccuracy: true, timeout: 2500, maximumAge: 60000 }
+          );
+        }).catch(() => {
+          // Tier 2: Try 8s High Accuracy
+          return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error("Timeout")), 9000);
+            Geolocation.getCurrentPosition(
+              (pos) => { clearTimeout(timer); resolve(pos); },
+              (err) => { clearTimeout(timer); reject(err); },
+              { enableHighAccuracy: true, timeout: 8000, maximumAge: 10000 }
+            );
+          });
+        });
+      })().catch(() => {
+        // Tier 3: Try 10s Balanced Accuracy
+        setProcessingStep('Improving GPS signal...');
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("Timeout")), 12000);
+          Geolocation.getCurrentPosition(
+            (pos) => { clearTimeout(timer); resolve(pos); },
+            (err) => { clearTimeout(timer); reject(err); },
+            { enableHighAccuracy: false, timeout: 10000, maximumAge: 10000 }
+          );
+        });
+      }).catch(err => {
+        console.error("GPS Error:", err);
+        throw new Error("GPS Signal Weak. Please stand in a clearer area.");
+      });
+
+      const { latitude: curLat, longitude: curLng } = position.coords;
+      setProcessingStep('Verifying zone...');
+
+      // 2. GEOFENCING (Only for Clock-In)
+      let distance = 0;
+      if (!isClockedIn) {
+        if (!staffData.restaurant_id) throw new Error("You are not assigned to any restaurant.");
+
+        const restDoc: any = await restaurantDataPromise;
+        if (!restDoc?.exists()) throw new Error("Restaurant profile not found in database.");
+
+        const restData = restDoc.data();
+        const restLat = parseFloat(restData.latitude);
+        const restLng = parseFloat(restData.longitude);
+
+        if (isNaN(restLat) || isNaN(restLng)) throw new Error("Restaurant location is not set in dashboard.");
+
+        distance = calculateDistance(curLat, curLng, restLat, restLng);
+        // Allow 100m buffer for GPS drift
+        if (distance > 100) {
+          throw new Error(`Out of Range: You are ${Math.round(distance)}m away from ${restData.restaurant_name}. Please move within 100m to clock in.`);
+        }
+      }
+
+      setProcessingStep('Saving to server...');
+
+      // 3. DATABASE SAVE
+      const locString = currentLocation || `${curLat.toFixed(4)}, ${curLng.toFixed(4)}`;
 
       if (!isClockedIn) {
-        const newSession = {
+        await addDoc(collection(db, "attendance"), {
           staff_id: staffId,
           clock_in: serverTimestamp(),
           clock_out: null,
           total_minutes: 0,
           date: serverTimestamp(),
           restaurant_id: staffData.restaurant_id || "",
-          location_in: currentLocation
-        };
-        console.log("[Clock] Adding new session:", newSession);
-        await addDoc(collection(db, "attendance"), newSession);
-        console.log("[Clock] Session added successfully");
-        setAlertConfig({
-          visible: true,
-          title: 'SUCCESS',
-          message: 'You have successfully clocked in!',
-          type: 'success',
+          location_in: locString,
+          distance_m: Math.round(distance)
         });
+        setAlertConfig({ visible: true, title: 'SUCCESS', message: 'Location verified. You have successfully clocked in!', type: 'success' });
       } else {
-        if (!activeSession?.id) {
-          console.error("[Clock] No active session found to clock out of!");
-          throw new Error("No active session ID");
-        }
+        if (!activeSession?.id) throw new Error("No active session found to clock out.");
+        
+        const cinDate = activeSession.clock_in?.toDate ? activeSession.clock_in.toDate() : new Date(activeSession.clock_in);
+        const diffMin = Math.floor((now.getTime() - cinDate.getTime()) / 60000);
 
-        const clockInDate = activeSession.clock_in?.toDate ? activeSession.clock_in.toDate() : new Date(activeSession.clock_in || Date.now());
-        const now = new Date();
-        const diffMs = now.getTime() - clockInDate.getTime();
-        const totalMinutes = Math.floor(diffMs / 60000);
-
-        console.log(`[Clock] Updating session ${activeSession.id}. Total minutes: ${totalMinutes}`);
         await updateDoc(doc(db, "attendance", activeSession.id), {
           clock_out: serverTimestamp(),
-          total_minutes: totalMinutes,
-          location_out: currentLocation
+          total_minutes: Math.max(0, diffMin),
+          location_out: locString
         });
-        console.log("[Clock] Session updated successfully");
         setShowConfirmLogout(false);
-        setAlertConfig({
-          visible: true,
-          title: 'SUCCESS',
-          message: 'You have successfully clocked out. Great work today!',
-          type: 'success',
-        });
+        setAlertConfig({ visible: true, title: 'SUCCESS', message: 'You have successfully clocked out. Great work today!', type: 'success' });
       }
     } catch (err: any) {
-
-      console.error('[Clock Toggle Error]:', err);
+      console.error("[Clock Toggle Error]:", err);
+      const isOutOfRange = err?.message?.includes("Out of Range");
+      
       setAlertConfig({
         visible: true,
-        title: 'ERROR',
-        message: err.message || 'Operation failed. Please check your internet.',
-        type: 'error',
+        title: isOutOfRange ? 'OUT OF RANGE' : 'ACTION FAILED',
+        message: err.message || "An error occurred.",
+        type: isOutOfRange ? 'warning' : 'error',
       });
     } finally {
       setClockLoading(false);
     }
-
   };
 
   const handleClockToggle = async () => {
@@ -465,7 +582,16 @@ const HomeScreen = ({ navigation, route }: any) => {
   const yesterdayOut = yesterdayLog.length > 0 && yesterdayLog[0].clock_out
     ? formatTime(yesterdayLog[0].clock_out)
     : '--';
-  const yesterdayTotal = yesterdayLog.reduce((sum: number, r: any) => sum + (r.total_minutes || 0), 0);
+  const yesterdayTotal = yesterdayLog.reduce((sum: number, r: any) => {
+    if (r.total_minutes) return sum + r.total_minutes;
+    // Fallback calculation if total_minutes is missing but we have both timestamps
+    if (r.clock_in && r.clock_out) {
+      const start = (r.clock_in.toDate ? r.clock_in.toDate() : new Date(r.clock_in)).getTime();
+      const end = (r.clock_out.toDate ? r.clock_out.toDate() : new Date(r.clock_out)).getTime();
+      return sum + Math.max(0, Math.floor((end - start) / 60000));
+    }
+    return sum;
+  }, 0);
   const yesterdayDateStr = (() => {
     const d = new Date();
     d.setDate(d.getDate() - 1);
@@ -481,7 +607,7 @@ const HomeScreen = ({ navigation, route }: any) => {
 
   return (
     <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
-      <StatusBar barStyle="dark-content" />
+      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent={true} />
 
       {/* CUSTOM NOTIFICATION BANNER */}
       <Animated.View 
@@ -498,7 +624,7 @@ const HomeScreen = ({ navigation, route }: any) => {
           style={styles.bannerContent}
           onPress={() => {
             bannerY.value = withTiming(-150);
-            navigation.navigate('Notifications');
+            navigation.navigate('Notification');
           }}
         >
           <View style={[styles.iconContainer, { backgroundColor: activeBanner?.priority === 'high' ? '#ef444420' : '#D0B07920' }]}>
@@ -522,7 +648,9 @@ const HomeScreen = ({ navigation, route }: any) => {
 
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
-          <Text style={styles.greetingText}>{greeting}, {getFirstName(staffData?.full_name)} 👋</Text>
+          <Text style={styles.greetingText} numberOfLines={1} ellipsizeMode="tail">
+            {greeting}, {getFirstName(staffData?.full_name)} 👋
+          </Text>
           <View style={styles.locationBadge}>
             <Text style={{ fontSize: 12, marginRight: 4 }}>📍</Text>
             <Text style={styles.locationText} numberOfLines={1}>{currentLocation}</Text>
@@ -595,7 +723,7 @@ const HomeScreen = ({ navigation, route }: any) => {
                 {isClockedIn ? '⏹️' : '▶️'}
               </Text>
               <Text style={styles.clockActionText}>
-                {clockLoading ? 'PROCESSING...' : (isClockedIn ? 'CLOCK\nOUT' : 'CLOCK\nIN')}
+                {clockLoading ? (processingStep || 'PROCESSING...') : (isClockedIn ? 'CLOCK\nOUT' : 'CLOCK\nIN')}
               </Text>
             </TouchableOpacity>
           </View>

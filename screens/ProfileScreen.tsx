@@ -48,7 +48,7 @@ const ProfileScreen = ({ navigation, route }: any) => {
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="dark-content" />
+      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent={true} />
       
       {/* Header */}
       <View style={[styles.header, { paddingTop: insets.top }]}>
