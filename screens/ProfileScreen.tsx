@@ -7,13 +7,14 @@ import {
   StatusBar,
   Image,
   Dimensions,
+  Alert,
 } from 'react-native';
 import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { doc, updateDoc } from 'firebase/firestore';
 
-
-import { auth } from '../lib/firebase';
+import { auth, db } from '../lib/firebase';
 
 const { width } = Dimensions.get('window');
 
@@ -21,8 +22,10 @@ const ProfileScreen = ({ navigation, route }: any) => {
   const insets = useSafeAreaInsets();
   const staff = route?.params?.staff;
   const [activeTab, setActiveTab] = useState('Personal');
+  const isClockedIn = route?.params?.isClockedIn;
+  const activeSession = route?.params?.activeSession;
 
-  const handleLogout = async () => {
+  const performLogout = async () => {
     try {
       await auth.signOut();
       await AsyncStorage.removeItem('staffData');
@@ -34,6 +37,43 @@ const ProfileScreen = ({ navigation, route }: any) => {
       index: 0,
       routes: [{ name: 'Login' }],
     });
+  };
+
+  const handleLogout = () => {
+    if (isClockedIn && activeSession) {
+      Alert.alert(
+        "Active Shift Detected",
+        "You are currently clocked in. Logging out of your profile will automatically clock you out of your current session. Do you want to proceed?",
+        [
+          { text: "Cancel", style: "cancel" },
+          { 
+            text: "Log Out & Clock Out", 
+            style: "destructive",
+            onPress: async () => {
+              try {
+                // Auto clock out logic
+                const now = new Date();
+                const cinDate = activeSession.clock_in?.toDate ? activeSession.clock_in.toDate() : new Date(activeSession.clock_in);
+                const diffMin = Math.max(1, Math.round((now.getTime() - cinDate.getTime()) / 60000));
+                const safeDiffMin = Math.min(diffMin, 1440);
+                
+                await updateDoc(doc(db, "attendance", activeSession.id), {
+                  clock_out: now,
+                  total_minutes: Math.max(0, safeDiffMin),
+                  location_out: "Auto logged out"
+                });
+              } catch (e) {
+                console.error("Error auto clocking out on logout:", e);
+              }
+              // Proceed to logout
+              performLogout();
+            }
+          }
+        ]
+      );
+    } else {
+      performLogout();
+    }
   };
 
 

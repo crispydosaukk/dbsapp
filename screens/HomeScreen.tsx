@@ -38,6 +38,7 @@ import {
   doc,
   serverTimestamp
 } from 'firebase/firestore';
+import { calcCalculatedMinutes } from '../lib/timeRounding';
 // No longer need width/height if not used
 Dimensions.get('window');
 
@@ -83,6 +84,28 @@ const minutesBetween = (from: any, to: Date): number => {
   return Math.max(0, diff);
 };
 
+const calcSessionMinutes = (record: any): number => {
+  if (record.clock_in && record.clock_out) {
+    return calcCalculatedMinutes(record.clock_in, record.clock_out);
+  }
+  return 0;
+};
+
+const getAutoLogoutTime = (clockIn: Date): Date => {
+  const hour = clockIn.getHours();
+  const logoutTime = new Date(clockIn.getTime());
+
+  if (hour >= 0 && hour < 18) {
+    // Clocked in between 00:00 and 17:59 -> Auto logout at next midnight
+    logoutTime.setHours(24, 0, 0, 0);
+  } else {
+    // Clocked in between 18:00 and 23:59 -> Auto logout at next 18:00 (6 PM)
+    logoutTime.setDate(logoutTime.getDate() + 1);
+    logoutTime.setHours(18, 0, 0, 0);
+  }
+  return logoutTime;
+};
+
 // ─── Component ──────────────────────────────────────────────────────────────
 
 const HomeScreen = ({ navigation, route }: any) => {
@@ -121,12 +144,8 @@ const HomeScreen = ({ navigation, route }: any) => {
   const locationWatchId = useRef<number | null>(null);
   const [showConfirmLogout, setShowConfirmLogout] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
-  const [activeBanner, setActiveBanner] = useState<any>(null);
-  const bannerY = useSharedValue(-150);
-  const bannerAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: bannerY.value }],
-    opacity: withTiming(bannerY.value > -100 ? 1 : 0),
-  }));
+  // Track shown scheduled notifications persistently across renders
+  const shownNotifIds = useRef(new Set<string>());
 
 
   const [alertConfig, setAlertConfig] = useState({
@@ -232,7 +251,7 @@ const HomeScreen = ({ navigation, route }: any) => {
 
       // 1. Identify the active session (the most recent one without a clock_out)
       // Since allLogs is sorted by clock_in desc, the first one without clock_out is the active one.
-      const active = allLogs.find(l => !l.clock_out);
+      let active = allLogs.find(l => !l.clock_out);
 
       // 2. Filter for today's completed logs and the active one if it started today
       const todayLogs = allLogs.filter(l => {
@@ -249,27 +268,46 @@ const HomeScreen = ({ navigation, route }: any) => {
       setYesterdayLog(yesterdayLogs);
 
       if (active) {
+        const cinDate = active.clock_in?.toDate ? active.clock_in.toDate() : new Date(active.clock_in);
+        const autoLogout = getAutoLogoutTime(cinDate);
+        const now = new Date();
+
+        if (now >= autoLogout) {
+          console.log(`[Clock] Auto-logout triggered for session: ${active.id}`);
+          const diffMin = Math.max(1, Math.round((autoLogout.getTime() - cinDate.getTime()) / 60000));
+          const safeDiffMin = Math.min(diffMin, 1440);
+
+          updateDoc(doc(db, "attendance", active.id), {
+            clock_out: autoLogout,
+            total_minutes: Math.max(0, safeDiffMin),
+            location_out: "System Auto-Logout"
+          }).catch(err => console.error("Auto logout error:", err));
+
+          active = undefined;
+        }
+      }
+
+      if (active) {
         console.log(`[Clock] Active session found: ${active.id} (Started: ${active.clock_in?.toDate ? active.clock_in.toDate() : active.clock_in})`);
         setActiveSession(active);
         setIsClockedIn(true);
 
         // Calculate minutes worked today so far (excluding current active session to avoid double counting in timer)
-        const previousMinutes = todayLogs.filter(l => l.id !== active.id).reduce((sum, l) => sum + (l.total_minutes || 0), 0);
+        const previousMinutes = todayLogs.filter(l => l.id !== active.id).reduce((sum, l) => sum + calcSessionMinutes(l), 0);
         startTimer(active.clock_in, previousMinutes);
       } else {
         console.log("[Clock] No active session found.");
         setActiveSession(null);
         setIsClockedIn(false);
         stopTimer();
-        const totalMin = todayLogs.reduce((sum, l) => sum + (l.total_minutes || 0), 0);
+        const totalMin = todayLogs.reduce((sum, l) => sum + calcSessionMinutes(l), 0);
         setShiftMinutes(totalMin);
       }
     }, (error) => {
       console.error("[Firestore Attendance Query Error]:", error);
     });
 
-    // Track which notifications have already been shown as popups during this session
-    const shownNotifIds = new Set<string>();
+    // Handled via the Ref above now
 
     const qNotif = query(
       collection(db, "notifications"),
@@ -279,6 +317,31 @@ const HomeScreen = ({ navigation, route }: any) => {
 
     // Use a Ref to store the latest notifications so the setInterval can access them safely
     const allNotificationsRef = { current: [] as any[] };
+
+    // Helper function to show banner smoothly
+    const triggerBanner = async (notif: any) => {
+      shownNotifIds.current.add(notif.id);
+      
+      // Show native OS notification instead of custom in-app banner
+      try {
+        const { default: notifee, AndroidImportance, AndroidVisibility } = await import('@notifee/react-native');
+        
+        await notifee.displayNotification({
+          title: notif.title || 'New Notification',
+          body: notif.body || 'You have a new message',
+          android: {
+            channelId: 'high_importance_channel',
+            importance: AndroidImportance.HIGH,
+            visibility: AndroidVisibility.PUBLIC,
+            pressAction: {
+              id: 'default',
+            },
+          },
+        });
+      } catch (err) {
+        console.error("Error displaying native notification:", err);
+      }
+    };
 
     unsubNotif = onSnapshot(qNotif, (snapshot) => {
       const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -299,15 +362,15 @@ const HomeScreen = ({ navigation, route }: any) => {
       snapshot.docChanges().forEach(change => {
         if (change.type === 'added') {
           const latest: any = { id: change.doc.id, ...change.doc.data() };
-          if (shownNotifIds.has(latest.id)) return;
+          if (shownNotifIds.current.has(latest.id)) return;
 
-          const isPast = latest.scheduled_for ? (latest.scheduled_for.toDate ? latest.scheduled_for.toDate().getTime() : new Date(latest.scheduled_for).getTime()) <= Date.now() : true;
-
-          if (latest.status === 'pending' || (latest.status === 'scheduled' && isPast)) {
-            setActiveBanner(latest);
-            shownNotifIds.add(latest.id);
-            bannerY.value = withSpring(16, { damping: 15 });
-            setTimeout(() => { bannerY.value = withTiming(-150); }, 5000);
+          // Only trigger banner for scheduled notifications. 
+          // 'pending' (immediate) notifications are handled instantly by Firebase FCM in NotificationService.js
+          if (latest.status === 'scheduled') {
+            const isPast = latest.scheduled_for ? (latest.scheduled_for.toDate ? latest.scheduled_for.toDate().getTime() : new Date(latest.scheduled_for).getTime()) <= Date.now() : true;
+            if (isPast) {
+              triggerBanner(latest);
+            }
           }
         }
       });
@@ -320,15 +383,12 @@ const HomeScreen = ({ navigation, route }: any) => {
 
       currentNotifs.forEach((n: any) => {
         // Only trigger if it's scheduled, has a time, hasn't been shown, and IS DUE NOW
-        if (n.status === 'scheduled' && n.scheduled_for && !shownNotifIds.has(n.id)) {
+        if (n.status === 'scheduled' && n.scheduled_for && !shownNotifIds.current.has(n.id)) {
           const sTime = n.scheduled_for.toDate ? n.scheduled_for.toDate().getTime() : new Date(n.scheduled_for).getTime();
 
           if (Date.now() >= sTime) {
             // RELEASE IT: Show banner and add to shown list
-            setActiveBanner(n);
-            shownNotifIds.add(n.id);
-            bannerY.value = withSpring(16, { damping: 15 });
-            setTimeout(() => { bannerY.value = withTiming(-150); }, 5000);
+            triggerBanner(n);
 
             // Instantly update the unread count so the badge on the bell icon refreshes
             const unread = currentNotifs.filter((item: any) => {
@@ -531,10 +591,10 @@ const HomeScreen = ({ navigation, route }: any) => {
       if (isNaN(restLat) || isNaN(restLng)) throw new Error("Restaurant location is not set in dashboard.");
 
       distance = calculateDistance(curLat, curLng, restLat, restLng);
-      // Allow 100m buffer for GPS drift
-      if (distance > 100) {
+      // Allow 50m buffer for GPS drift
+      if (distance > 50) {
         const action = isClockedIn ? 'clock out' : 'clock in';
-        throw new Error(`Out of Range: You are ${Math.round(distance)}m away from ${restData.restaurant_name}. Please move within 100m to ${action}.`);
+        throw new Error(`Out of Range: You are ${Math.round(distance)}m away from ${restData.restaurant_name}. Please move within 50m to ${action}.`);
       }
 
       // 3. DATABASE SAVE
@@ -562,10 +622,12 @@ const HomeScreen = ({ navigation, route }: any) => {
 
         const cinDate = activeSession.clock_in?.toDate ? activeSession.clock_in.toDate() : new Date(activeSession.clock_in);
         const diffMin = Math.max(1, Math.round((now.getTime() - cinDate.getTime()) / 60000));
+        // Safety cap: no single session should exceed 24 hours (1440 min)
+        const safeDiffMin = Math.min(diffMin, 1440);
 
         await updateDoc(doc(db, "attendance", activeSession.id), {
-          clock_out: serverTimestamp(),
-          total_minutes: Math.max(0, diffMin),
+          clock_out: now,
+          total_minutes: Math.max(0, safeDiffMin),
           location_out: locString
         });
         setProcessingStep('🎉 Clocked Out!');
@@ -607,16 +669,7 @@ const HomeScreen = ({ navigation, route }: any) => {
   const yesterdayOut = yesterdayLog.length > 0 && yesterdayLog[0].clock_out
     ? formatTime(yesterdayLog[0].clock_out)
     : '--';
-  const yesterdayTotal = yesterdayLog.reduce((sum: number, r: any) => {
-    if (r.total_minutes) return sum + r.total_minutes;
-    // Fallback calculation if total_minutes is missing but we have both timestamps
-    if (r.clock_in && r.clock_out) {
-      const start = (r.clock_in.toDate ? r.clock_in.toDate() : new Date(r.clock_in)).getTime();
-      const end = (r.clock_out.toDate ? r.clock_out.toDate() : new Date(r.clock_out)).getTime();
-      return sum + Math.max(0, Math.floor((end - start) / 60000));
-    }
-    return sum;
-  }, 0);
+  const yesterdayTotal = yesterdayLog.reduce((sum: number, r: any) => sum + calcSessionMinutes(r), 0);
   const yesterdayDateStr = (() => {
     const d = new Date();
     d.setDate(d.getDate() - 1);
@@ -634,39 +687,7 @@ const HomeScreen = ({ navigation, route }: any) => {
     <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
       <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent={true} />
 
-      {/* CUSTOM NOTIFICATION BANNER */}
-      <Animated.View
-        style={[
-          styles.notificationBanner,
-          { top: insets.top + 8 },
-          bannerAnimatedStyle,
-        ]}
-      >
-        <Pressable
-          style={styles.bannerContent}
-          onPress={() => {
-            bannerY.value = withTiming(-150);
-            navigation.navigate('Notification');
-          }}
-        >
-          <View style={[styles.iconContainer, { backgroundColor: activeBanner?.priority === 'high' ? '#ef444420' : '#D0B07920' }]}>
-            {activeBanner?.priority === 'high' ? (
-              <AlertTriangle size={20} color="#ef4444" />
-            ) : (
-              <Bell size={20} color="#D0B079" />
-            )}
-          </View>
-          <View style={{ flex: 1, marginLeft: 12, marginRight: 8 }}>
-            <Text style={styles.bannerTitle} numberOfLines={1}>
-              {activeBanner?.title || 'New Notification'}
-            </Text>
-            <Text style={styles.bannerBody} numberOfLines={1}>
-              {activeBanner?.body || 'You have a new message'}
-            </Text>
-          </View>
-          <ChevronRight size={16} color="#475569" />
-        </Pressable>
-      </Animated.View>
+      {/* CUSTOM NOTIFICATION BANNER REMOVED (Replaced by Notifee) */}
 
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
@@ -690,7 +711,7 @@ const HomeScreen = ({ navigation, route }: any) => {
               </View>
             )}
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => navigation.navigate('Profile', { staff: staffData })}>
+          <TouchableOpacity onPress={() => navigation.navigate('Profile', { staff: staffData, isClockedIn, activeSession })}>
             {staffData?.profile_image ? (
               <Image
                 source={{ uri: staffData.profile_image }}
