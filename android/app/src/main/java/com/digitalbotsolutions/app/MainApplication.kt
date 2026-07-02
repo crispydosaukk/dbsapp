@@ -1,4 +1,4 @@
-package com.watanstaff
+package com.digitalbotsolutions.app
 
 import android.app.Application
 import com.facebook.react.PackageList

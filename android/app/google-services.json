@@ -1,21 +1,21 @@
 {
   "project_info": {
-    "project_number": "346578008533",
-    "project_id": "watanstaff-prod",
-    "storage_bucket": "watanstaff-prod.firebasestorage.app"
+    "project_number": "11076595811",
+    "project_id": "digitalbotsolutionsapp",
+    "storage_bucket": "digitalbotsolutionsapp.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:346578008533:android:ba7454f22d6f02e7b4e55c",
+        "mobilesdk_app_id": "1:11076595811:android:488a9a3e55ef179460c856",
         "android_client_info": {
-          "package_name": "com.watanstaffapp"
+          "package_name": "com.digitalbotsolutions.app"
         }
       },
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyCyg836GqzzpeuZJM9iB5ZR7ONyYH-emcA"
+          "current_key": "AIzaSyBLSLV_-EEN3KoLwfQL4nWtjNxKxgqqSFQ"
         }
       ],
       "services": {

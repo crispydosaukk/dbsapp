@@ -1,7 +1,7 @@
 {
-  "name": "WatanStaff",
-  "displayName": "WatanStaff",
+  "name": "digitalbotsolutions",
+  "displayName": "digitalbotsolutions",
   "ios": {
-    "bundleIdentifier": "com.watanstaff.app"
+    "bundleIdentifier": "com.digitalbotsolutions.app.app"
   }
 }
