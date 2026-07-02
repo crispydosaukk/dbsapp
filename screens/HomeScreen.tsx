@@ -421,6 +421,32 @@ const HomeScreen = ({ navigation, route }: any) => {
 
   }, [staffData, startTimer, stopTimer, navigation]);
 
+  const activeSessionRef = useRef(activeSession);
+  const isClockedInRef = useRef(isClockedIn);
+  const restaurantDataRef = useRef(restaurantData);
+
+  useEffect(() => {
+    activeSessionRef.current = activeSession;
+    isClockedInRef.current = isClockedIn;
+    restaurantDataRef.current = restaurantData;
+  }, [activeSession, isClockedIn, restaurantData]);
+
+  // Helper: Calculate distance in meters between two GPS points (Haversine formula)
+  const calculateDistance = useCallback((lat1: number, lon1: number, lat2: number, lon2: number) => {
+    const R = 6371e3; // Earth's radius in meters
+    const φ1 = lat1 * Math.PI / 180;
+    const φ2 = lat2 * Math.PI / 180;
+    const Δφ = (lat2 - lat1) * Math.PI / 180;
+    const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+      Math.cos(φ1) * Math.cos(φ2) *
+      Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+    return R * c; // Distance in meters
+  }, []);
+
   useEffect(() => {
     const reverseGeocode = async (latitude: number, longitude: number) => {
       try {
@@ -456,9 +482,69 @@ const HomeScreen = ({ navigation, route }: any) => {
     const startWatching = () => {
       if (locationWatchId.current) Geolocation.clearWatch(locationWatchId.current);
       locationWatchId.current = Geolocation.watchPosition(
-        pos => {
+        async pos => {
           lastLocation.current = pos;
           const { latitude, longitude } = pos.coords;
+          
+          // Auto Clock-Out if crossing the geofence radius
+          if (isClockedInRef.current && activeSessionRef.current && restaurantDataRef.current) {
+            const restLat = parseFloat(restaurantDataRef.current.latitude);
+            const restLng = parseFloat(restaurantDataRef.current.longitude);
+            const allowedRadius = restaurantDataRef.current.geofence_radius !== undefined 
+              ? parseFloat(restaurantDataRef.current.geofence_radius) 
+              : 50;
+
+            if (!isNaN(restLat) && !isNaN(restLng)) {
+              const distance = calculateDistance(latitude, longitude, restLat, restLng);
+              if (distance > allowedRadius) {
+                console.log(`[Geofence] Auto clock-out triggered. Distance: ${distance}m`);
+                try {
+                  const now = new Date();
+                  const currentSession = activeSessionRef.current;
+                  const cinDate = currentSession.clock_in?.toDate 
+                    ? currentSession.clock_in.toDate() 
+                    : new Date(currentSession.clock_in);
+                  
+                  const diffMin = Math.max(1, Math.round((now.getTime() - cinDate.getTime()) / 60000));
+                  const safeDiffMin = Math.min(diffMin, 1440);
+                  
+                  let locName = 'Unknown Location';
+                  try {
+                    const response = await fetch(
+                      `https://maps.googleapis.com/maps/api/geocode/json?latlng=${latitude},${longitude}&key=${GOOGLE_MAPS_API_KEY}`
+                    );
+                    const data = await response.json();
+                    if (data.results && data.results.length > 0) {
+                      locName = data.results[0].formatted_address;
+                    }
+                  } catch (e) {
+                    console.error('Reverse geocode failed:', e);
+                  }
+
+                  const outReason = `-- (${locName})`; 
+                  
+                  setIsClockedIn(false);
+                  setActiveSession(null);
+
+                  await updateDoc(doc(db, "attendance", currentSession.id), {
+                    clock_out: now,
+                    total_minutes: Math.max(0, safeDiffMin),
+                    location_out: outReason
+                  });
+                  
+                  setAlertConfig({ 
+                    visible: true, 
+                    title: 'AUTO CLOCK OUT', 
+                    message: `You were automatically clocked out because you crossed the workplace radius.`, 
+                    type: 'info' 
+                  });
+                } catch (err) {
+                  console.error("Auto clock out error:", err);
+                }
+              }
+            }
+          }
+
           reverseGeocode(latitude, longitude);
         },
         err => console.log("[GPS Watch] Error:", err),
@@ -501,21 +587,7 @@ const HomeScreen = ({ navigation, route }: any) => {
     return fullName.trim().split(' ')[0];
   };
 
-  // Helper: Calculate distance in meters between two GPS points (Haversine formula)
-  const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
-    const R = 6371e3; // Earth's radius in meters
-    const φ1 = lat1 * Math.PI / 180;
-    const φ2 = lat2 * Math.PI / 180;
-    const Δφ = (lat2 - lat1) * Math.PI / 180;
-    const Δλ = (lon2 - lon1) * Math.PI / 180;
-
-    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-      Math.cos(φ1) * Math.cos(φ2) *
-      Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-
-    return R * c; // Distance in meters
-  };
+  // Helper function moved above useEffect
 
   const performClockAction = async () => {
     if (clockLoading || !staffData) return;
