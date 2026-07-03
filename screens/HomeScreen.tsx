@@ -106,6 +106,7 @@ const HomeScreen = ({ navigation, route }: any) => {
   const [activeSession, setActiveSession] = useState<any>(null);
   const [shiftMinutes, setShiftMinutes] = useState(0);
   const [yesterdayLog, setYesterdayLog] = useState<any[]>([]);
+  const [todayLog, setTodayLog] = useState<any[]>([]);
   const [currentLocation, setCurrentLocation] = useState('Detecting location...');
   const [greeting, setGreeting] = useState(getGreeting());
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -259,6 +260,7 @@ const HomeScreen = ({ navigation, route }: any) => {
         const cIn = l.clock_in?.toDate ? l.clock_in.toDate() : new Date(l.clock_in);
         return cIn >= today;
       });
+      setTodayLog(todayLogs);
 
       // 3. Filter for yesterday's logs
       const yesterdayLogs = allLogs.filter(l => {
@@ -532,12 +534,7 @@ const HomeScreen = ({ navigation, route }: any) => {
                     location_out: outReason
                   });
                   
-                  setAlertConfig({ 
-                    visible: true, 
-                    title: 'AUTO CLOCK OUT', 
-                    message: `You were automatically clocked out because you crossed the workplace radius.`, 
-                    type: 'info' 
-                  });
+                  // Auto clock-out alert removed by user request
                 } catch (err) {
                   console.error("Auto clock out error:", err);
                 }
@@ -756,6 +753,10 @@ const HomeScreen = ({ navigation, route }: any) => {
     return d.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short' });
   })();
 
+  const lastTodayClockOut = (!isClockedIn && todayLog.length > 0 && todayLog[0].clock_out)
+    ? formatTime(todayLog[0].clock_out)
+    : null;
+
   const shiftLabel = isClockedIn ? 'SHIFT DURATION:' : 'CLOCK-IN TIME:';
   const shiftValue = isClockedIn
     ? formatDuration(shiftMinutes)
@@ -819,14 +820,29 @@ const HomeScreen = ({ navigation, route }: any) => {
           </View>
 
           <View style={styles.shiftMainSlim}>
-            <View>
-              <Text style={styles.loginLabelSlim}>{shiftLabel}</Text>
-              <Text style={styles.loginTimeSlim}>{shiftValue}</Text>
-            </View>
-            {isClockedIn && activeSession?.clock_in && (
-              <View style={{ alignItems: 'flex-end' }}>
-                <Text style={styles.startTimeLabel}>CLOCKED IN AT:</Text>
-                <Text style={styles.startTimeValue}>{formatTime(activeSession.clock_in)}</Text>
+            {isClockedIn ? (
+              <>
+                <View>
+                  <Text style={styles.loginLabelSlim}>{shiftLabel}</Text>
+                  <Text style={styles.loginTimeSlim}>{shiftValue}</Text>
+                </View>
+                {activeSession?.clock_in && (
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={styles.startTimeLabel}>CLOCKED IN AT:</Text>
+                    <Text style={styles.startTimeValue}>{formatTime(activeSession.clock_in)}</Text>
+                  </View>
+                )}
+              </>
+            ) : lastTodayClockOut ? (
+              <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+                <Text style={{ color: 'white', fontSize: 16, fontWeight: '500', letterSpacing: 0.5, opacity: 0.9 }}>
+                  You have clocked out at {lastTodayClockOut}
+                </Text>
+              </View>
+            ) : (
+              <View>
+                <Text style={styles.loginLabelSlim}>{shiftLabel}</Text>
+                <Text style={styles.loginTimeSlim}>{shiftValue}</Text>
               </View>
             )}
           </View>
