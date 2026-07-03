@@ -100,7 +100,7 @@ const LoginScreen = ({ navigation }: any) => {
             {/* Logo Wrapper */}
             <Animated.View style={styles.logoWrapper}>
               <Image 
-                source={require('../public/digitalbotsolutions.jpeg')} 
+                source={require('../public/digitalbotsolutions.png')} 
                 style={styles.logoImage}
                 resizeMode="contain"
               />
@@ -110,7 +110,7 @@ const LoginScreen = ({ navigation }: any) => {
             <Animated.View style={styles.brandingContainer}>
               <View style={styles.titleRow}>
                 <Text style={{ fontSize: 24, marginRight: 8 }}>🕒</Text>
-                <Text style={styles.appName}>DigitalBotSolutions</Text>
+                <Text style={styles.appName}>DigitalBot</Text>
               </View>
               <Text style={styles.appSubtitle}>Restaurant Staff Management</Text>
             </Animated.View>
