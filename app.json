@@ -1,6 +1,6 @@
 {
   "name": "digitalbotsolutions",
-  "displayName": "DigitalBot",
+  "displayName": "DigitalBotOffice",
   "ios": {
     "bundleIdentifier": "com.digitalbotsolutions.app.app"
   }

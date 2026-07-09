@@ -854,36 +854,49 @@ const HomeScreen = ({ navigation, route }: any) => {
       <View style={styles.clockSection}>
         <View style={styles.clockCenterContainer}>
           <Animated.View style={[styles.clockOuterRing, animatedButtonStyle]}>
-            <TouchableOpacity
-              style={[styles.clockButton, isClockedIn ? styles.clockButtonOut : styles.clockButtonIn]}
-              onPress={handleClockToggle}
-              activeOpacity={0.7}
-              disabled={clockLoading}
-            >
-              {clockLoading ? (
-                <Text style={styles.clockStepText}>{processingStep}</Text>
-              ) : (
-                <>
-                  <Text style={{ fontSize: 44 }}>
-                    {isClockedIn ? '⏹️' : '▶️'}
-                  </Text>
-                  <Text style={styles.clockActionText}>
-                    {isClockedIn ? 'CLOCK\nOUT' : 'CLOCK\nIN'}
-                  </Text>
-                </>
-              )}
-            </TouchableOpacity>
+            {staffData?.face_attendance_only ? (
+              <View style={[styles.clockButton, { backgroundColor: '#64748B' }]}>
+                <Text style={{ fontSize: 36 }}>📷</Text>
+                <Text style={[styles.clockActionText, { fontSize: 10, paddingHorizontal: 10 }]}>
+                  USE KIOSK
+                </Text>
+              </View>
+            ) : (
+              <TouchableOpacity
+                style={[styles.clockButton, isClockedIn ? styles.clockButtonOut : styles.clockButtonIn]}
+                onPress={handleClockToggle}
+                activeOpacity={0.7}
+                disabled={clockLoading}
+              >
+                {clockLoading ? (
+                  <Text style={styles.clockStepText}>{processingStep}</Text>
+                ) : (
+                  <>
+                    <Text style={{ fontSize: 44 }}>
+                      {isClockedIn ? '⏹️' : '▶️'}
+                    </Text>
+                    <Text style={styles.clockActionText}>
+                      {isClockedIn ? 'CLOCK\nOUT' : 'CLOCK\nIN'}
+                    </Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            )}
           </Animated.View>
         </View>
 
         <View style={styles.clockStatusContainer}>
-          <View style={[styles.clockStatusDot, isClockedIn && styles.clockStatusDotActive]} />
+          <View style={[styles.clockStatusDot, (isClockedIn || staffData?.face_attendance_only) && styles.clockStatusDotActive]} />
           <Text style={styles.clockStatusText}>
-            {isClockedIn ? 'CURRENTLY CLOCKED IN' : 'READY TO START'}
+            {staffData?.face_attendance_only
+              ? 'BIOMETRIC ENABLED'
+              : isClockedIn ? 'CURRENTLY CLOCKED IN' : 'READY TO START'}
           </Text>
         </View>
         <Text style={styles.clockHint}>
-          {isClockedIn ? 'System is recording your hours...' : 'Tap the button to start your shift'}
+          {staffData?.face_attendance_only
+            ? 'Clock-in is restricted to the Face Kiosk.'
+            : isClockedIn ? 'System is recording your hours...' : 'Tap the button to start your shift'}
         </Text>
       </View>
 
